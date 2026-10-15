@@ -1,0 +1,36 @@
+name: MARC Daily Stock Scanner
+
+on:
+  schedule:
+    - cron: "0 9 * * 1-5"
+      timezone: "Asia/Jakarta"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marc-daily-stock-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan-and-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: marc-stock-scanner/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r marc-stock-scanner/requirements.txt
+      - name: Run MARC scanner
+        working-directory: marc-stock-scanner
+        env:
+          TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python marc_scanner.py
