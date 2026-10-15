@@ -18,7 +18,7 @@ def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = gain / loss.replace(0, float("nan"))
+    rs = gain / loss
     return 100 - (100 / (1 + rs))
 
 
