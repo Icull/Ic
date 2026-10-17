@@ -93,15 +93,34 @@ def scan_stocks():
     now=datetime.now(JAKARTA); latest=max(r["date"] for r in ranked)
     if (now.date()-datetime.strptime(latest,"%Y-%m-%d").date()).days>5:
         raise RuntimeError(f"Data saham terakhir {latest} terlalu lama; laporan dibatalkan.")
-    lines=["📈 MARC | SAHAM INDONESIA + GLOBAL",f"Waktu: {now:%d %b %Y %H:%M WIB} | Data terakhir: {latest}",
-           "Top 10 kandidat pergerakan/volume sesi berikutnya; bukan prediksi pasti.",
-           "Ranking dari watchlist, bukan seluruh bursa.",""]
+    lines=["📊 MARC DAILY SCANNER",
+           "━━━━━━━━━━━━━━━━━━━━",
+           "PASAR SAHAM | INDONESIA & GLOBAL",
+           f"⏱ Analisis dibuat: {now:%d %b %Y • %H:%M WIB}",
+           f"🗓 Data terakhir tersedia: {latest}",
+           "🎯 Tujuan: shortlist kandidat untuk sesi berikutnya.",
+           "ℹ️ Peringkat hanya dari watchlist MARC, bukan seluruh bursa.",
+           "",
+           "CARA BACA",
+           "Skor = gabungan tren, momentum, volume, RSI, dan volatilitas.",
+           "Vol 1.0x = setara rata-rata; di atas 1.0x = volume relatif meningkat.",
+           "",
+           "TOP 10 KANDIDAT",
+           "────────────────────"]
     for i,r in enumerate(ranked[:TOP_N],1):
         price=f"Rp{r['close']:,.0f}" if r["ticker"].endswith(".JK") else f"{r['close']:,.2f} (mata uang listing)"
-        lines += [f"{i}. {r['ticker']} ({r['region']}) — {price} | skor {r['score']}/11",
-                  f"   1D {r['ret1']:+.2f}% · 5D {r['ret5']:+.2f}% · 20D {r['ret20']:+.2f}% · RSI {r['rsi']:.0f} · Vol {r['vol_ratio']:.1f}x",
-                  "   "+", ".join(r["reasons"][:3])]
-    lines += ["","Periksa kalender bursa, berita, likuiditas, dan harga broker sebelum transaksi."]
+        lines += [f"{i:02d} | {r['ticker']} — {r['region']}",
+                  f"   Harga: {price} | Skor: {r['score']} (indikatif)",
+                  f"   Perubahan: 1 hari {r['ret1']:+.2f}% • 5 hari {r['ret5']:+.2f}% • 20 hari {r['ret20']:+.2f}%",
+                  f"   RSI: {r['rsi']:.0f} | Volume relatif: {r['vol_ratio']:.1f}x",
+                  "   Alasan masuk daftar: "+("; ".join(r["reasons"][:3]) if r["reasons"] else "belum ada konfirmasi kuat"),
+                  ""]
+    lines += ["────────────────────",
+               "PANDUAN TINDAKAN",
+               "• Gunakan daftar ini sebagai watchlist, bukan instruksi beli.",
+               "• Prioritaskan konfirmasi harga, volume, likuiditas, dan berita.",
+               "• Cek kalender bursa dan harga broker sebelum transaksi.",
+               "• Skor bukan probabilitas keuntungan dan tidak menjamin hasil."]
     return "\n".join(lines)
 
 def scan_crypto():
@@ -125,18 +144,50 @@ def scan_crypto():
         except (KeyError,ValueError,TypeError,IndexError,ZeroDivisionError): continue
     ranked.sort(key=lambda r:(r["score"],r["vol"]),reverse=True)
     if not ranked: raise RuntimeError("Tidak ada data crypto valid dari penyedia.")
-    now=datetime.now(JAKARTA); lines=["₿ MARC | CRYPTO MOMENTUM & HYPE",
-       f"Waktu: {now:%d %b %Y %H:%M WIB} | Data candle 1 jam terakhir: {max(r['date'] for r in ranked)}",
-       "Top 10 dari watchlist; hype ≠ jaminan likuiditas/profit.",""]
+    now=datetime.now(JAKARTA); lines=["📊 MARC DAILY SCANNER",
+       "━━━━━━━━━━━━━━━━━━━━",
+       "PASAR CRYPTO | MOMENTUM & AKTIVITAS",
+       f"⏱ Analisis dibuat: {now:%d %b %Y • %H:%M WIB}",
+       f"🗓 Tanggal candle terbaru: {max(r['date'] for r in ranked)}",
+       "🎯 Tujuan: menemukan aset dengan momentum dan aktivitas relatif tinggi.",
+       "ℹ️ Peringkat hanya dari watchlist MARC; skor hype bukan probabilitas profit.",
+       "",
+       "CARA BACA",
+       "24 jam = perubahan kira-kira 24 candle 1 jam; 7 hari = sekitar 7 hari.",
+       "Vol 1.0x = rata-rata volume; lebih tinggi menunjukkan aktivitas relatif naik.",
+       "",
+       "TOP 10 KANDIDAT",
+       "────────────────────"]
     for i,r in enumerate(ranked[:TOP_N],1):
-        lines += [f"{i}. {r['ticker']} — {r['price']:.6g} USD | hype {r['score']:.1f}",
-                  f"   24j {r['ret1']:+.2f}% · 7D {r['ret7']:+.2f}% · RSI {r['rsi']:.0f} · Vol {r['vol']:.1f}x"]
-    lines += ["","Periksa spread, kedalaman order book, exchange, funding, dan berita."]
+        lines += [f"{i:02d} | {r['ticker']} — {r['name']}",
+                  f"   Harga referensi: {r['price']:.6g} USD | Skor momentum: {r['score']:.1f}",
+                  f"   Perubahan: 24 jam {r['ret1']:+.2f}% • 7 hari {r['ret7']:+.2f}%",
+                  f"   RSI: {r['rsi']:.0f} | Volume relatif: {r['vol']:.1f}x",
+                  "   Catatan: periksa pasangan trading, spread, dan kedalaman order book.",
+                  ""]
+    lines += ["────────────────────",
+              "PANDUAN TINDAKAN",
+              "• Pergerakan tajam dapat berbalik cepat; hindari mengejar candle.",
+              "• Validasi pair/exchange, spread, kedalaman order book, funding, dan berita.",
+              "• RSI tinggi dapat menandakan kondisi terlalu panas, bukan sinyal jual otomatis.",
+              "• Skor tidak memperhitungkan semua risiko dan bukan jaminan profit."]
     return "\n".join(lines)
 
 def scan_commodities():
-    now=datetime.now(JAKARTA); lines=["🛢️ MARC | KOMODITAS: LEVEL & SETUP 1–5 JAM",
-        f"Waktu analisis: {now:%d %b %Y %H:%M WIB}","Level indikatif dari candle 15 menit, bukan sinyal otomatis.",""]
+    now=datetime.now(JAKARTA); lines=["📊 MARC DAILY SCANNER",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "PASAR KOMODITAS | SETUP INTRADAY 1–5 JAM",
+        f"⏱ Analisis dibuat: {now:%d %b %Y • %H:%M WIB}",
+        "🕯 Kerangka analisis: candle 15 menit",
+        "ℹ️ Level dihitung dari 20 candle terbaru; indikatif dan dapat berubah.",
+        "",
+        "CARA BACA",
+        "Support = area pantulan potensial • Resistance = area hambatan potensial.",
+        "LONG/SHORT WATCH = skenario untuk dipantau, bukan perintah entry.",
+        "WAIT = kondisi belum cukup jelas menurut aturan scanner.",
+        "",
+        "HASIL PER INSTRUMEN",
+        "────────────────────"]
     valid=0
     for ticker,name in load_market_csv(COMMODITY_FILE):
         try:
@@ -153,12 +204,23 @@ def scan_commodities():
             elif ema9<ema21 and 28<strength<=55 and p>s*1.003:
                 bias="SHORT WATCH" if p>resistance-span*.65 else "tunggu konfirmasi"
             else: bias="WAIT / no-trade"
-            lines += [f"{ticker} — {name}",f"   Harga {p:.4g} | Support {s:.4g} | Resistance {resistance:.4g}",
-                      f"   Bias 1–5 jam: {bias} · RSI {strength:.0f} · jarak S {max((p-s)/p*100,0):.2f}% / R {max((resistance-p)/p*100,0):.2f}%"]
+            lines += [f"INSTRUMEN: {ticker} — {name}",
+                      f"   Harga referensi: {p:.4g}",
+                      f"   Support indikatif: {s:.4g} | Jarak harga ke support: {max((p-s)/p*100,0):.2f}%",
+                      f"   Resistance indikatif: {resistance:.4g} | Jarak harga ke resistance: {max((resistance-p)/p*100,0):.2f}%",
+                      f"   Tren: EMA9 {'di atas' if ema9>ema21 else 'di bawah/bersilangan dengan'} EMA21 | RSI: {strength:.0f}",
+                      f"   STATUS: {bias}",
+                      ""]
             valid+=1
         except Exception as exc: print(f"Commodity skip {ticker}: {exc}",file=sys.stderr)
     if not valid: raise RuntimeError("Data intraday komoditas tidak tersedia.")
-    lines += ["","Support/resistance berdasarkan 20 candle 15m terbaru. Periksa sesi, kontrak/rollover, spread dan stop-loss."]
+    lines += ["────────────────────",
+              "CHECKLIST SEBELUM TRADING",
+              "• Pastikan sesi perdagangan aktif dan data harga masih relevan.",
+              "• Cek spread, likuiditas, kontrak futures, dan risiko rollover.",
+              "• Tentukan entry, invalidasi skenario, stop-loss, dan ukuran posisi terlebih dahulu.",
+              "• Jika level terlalu dekat atau arah belum jelas, prioritaskan WAIT.",
+              "• Analisis teknikal tidak menjamin hasil; validasi melalui platform broker."]
     return "\n".join(lines)
 
 def send_telegram(message):
