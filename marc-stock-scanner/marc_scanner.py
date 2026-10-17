@@ -1,10 +1,8 @@
-"""MARC: daily BEI momentum watchlist. Not investment advice."""
-import os
-import sys
+"""MARC multi-market scanner: stocks, crypto and commodities."""
+import os, sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
 import pandas as pd
 import requests
 import yfinance as yf
@@ -12,180 +10,186 @@ import yfinance as yf
 ROOT = Path(__file__).resolve().parent
 JAKARTA = ZoneInfo("Asia/Jakarta")
 TOP_N = 10
-
+GLOBAL_STOCKS_FILE = ROOT / "global_stocks.csv"
+CRYPTO_FILE = ROOT / "crypto_universe.csv"
+COMMODITY_FILE = ROOT / "commodity_universe.csv"
 
 def rsi(series, period=14):
     delta = series.diff()
-    gain = delta.clip(lower=0).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
+    gain = delta.clip(lower=0).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    rs = gain / loss.replace(0, float("nan"))
+    result = 100 - (100 / (1 + rs))
+    result = result.mask(loss == 0, 100.0).mask((gain == 0) & (loss == 0), 50.0)
+    return result.fillna(50.0)
 
 def load_universe():
-    frame = pd.read_csv(ROOT / "universe.csv")
-    frame = frame.dropna(subset=["ticker"])
-    return [(str(row["ticker"]).strip().upper(), str(row.get("name", "")).strip())
-            for _, row in frame.iterrows() if str(row["ticker"]).strip()]
+    frame = pd.read_csv(ROOT / "universe.csv").dropna(subset=["ticker"])
+    return [(str(r["ticker"]).strip().upper(), str(r.get("name", "")).strip())
+            for _, r in frame.iterrows() if str(r["ticker"]).strip()]
 
+def load_market_csv(path):
+    frame = pd.read_csv(path).dropna(subset=["ticker"])
+    return [(str(r["ticker"]).strip().upper(), str(r.get("name", "")).strip())
+            for _, r in frame.iterrows() if str(r["ticker"]).strip()]
 
-def get_history(symbols):
-    data = yf.download(
-        tickers=[f"{symbol}.JK" for symbol in symbols],
-        period="6mo", interval="1d", auto_adjust=True,
-        group_by="ticker", threads=True, progress=False, timeout=25,
-    )
-    if data is None or data.empty:
-        raise RuntimeError("Penyedia data tidak mengembalikan data harga.")
-    return data
+def load_stock_universe():
+    rows = [(f"{t}.JK", n, "Indonesia") for t, n in load_universe()]
+    rows += [(t, n, "Global") for t, n in load_market_csv(GLOBAL_STOCKS_FILE)]
+    result, seen = [], set()
+    for row in rows:
+        if row[0] not in seen:
+            seen.add(row[0]); result.append(row)
+    return result
 
+def extract_symbol(data, symbol):
+    if data is None or data.empty: return pd.DataFrame()
+    if not isinstance(data.columns, pd.MultiIndex): return data.copy()
+    for level in (0, 1):
+        if symbol in data.columns.get_level_values(level):
+            try:
+                frame = data.xs(symbol, axis=1, level=level, drop_level=True)
+                if isinstance(frame.columns, pd.MultiIndex): frame.columns = frame.columns.get_level_values(-1)
+                return frame.copy()
+            except (KeyError, ValueError): pass
+    return pd.DataFrame()
 
-def score_stock(symbol, name, history):
+def download_history(symbols, period="6mo", interval="1d"):
+    if not symbols: return None
+    return yf.download(tickers=symbols, period=period, interval=interval, auto_adjust=True,
+                       group_by="ticker", threads=True, progress=False, timeout=25)
+
+def score_stock(symbol, name, history, region=""):
     try:
-        if isinstance(history.columns, pd.MultiIndex):
-            ticker = f"{symbol}.JK"
-            if ticker not in history.columns.get_level_values(0):
-                return None
-            frame = history[ticker].copy()
-        else:
-            frame = history.copy()
-        if not {"Close", "Volume"}.issubset(set(frame.columns)):
-            return None
-        frame = frame[["Close", "Volume"]].dropna()
-        frame = frame[frame["Close"] > 0]
-        if len(frame) < 55:
-            return None
+        frame = history.copy()
+        if not {"Close", "Volume"}.issubset(frame.columns): return None
+        frame = frame[["Close", "Volume"] + (["High", "Low"] if {"High","Low"}.issubset(frame.columns) else [])].dropna()
+        frame = frame[frame.Close > 0]
+        if len(frame) < 55: return None
+        close, volume = frame.Close.astype(float), frame.Volume.astype(float)
+        ema20, ema50 = close.ewm(span=20, adjust=False).mean(), close.ewm(span=50, adjust=False).mean()
+        strength, avgvol = rsi(close), volume.rolling(20).mean()
+        price, prev = float(close.iloc[-1]), float(close.iloc[-2])
+        ret1, ret5, ret20 = (price/prev-1)*100, (price/float(close.iloc[-6])-1)*100, (price/float(close.iloc[-21])-1)*100
+        av = float(avgvol.iloc[-2]) if len(avgvol)>1 and pd.notna(avgvol.iloc[-2]) else 0
+        vr = float(volume.iloc[-1]/av) if av>0 else 0
+        rng = ((frame.High.iloc[-20:].max()-frame.Low.iloc[-20:].min())/price*100) if {"High","Low"}.issubset(frame.columns) else abs(ret5)
+        checks = [(price>ema20.iloc[-1],2,"harga di atas EMA20"),(ema20.iloc[-1]>ema50.iloc[-1],2,"tren EMA20 > EMA50"),
+                  (ret5>0,2,"momentum 5 hari positif"),(ret20>0,1,"momentum 20 hari positif"),
+                  (vr>=1.2,2,"volume di atas rata-rata"),(50<=strength.iloc[-1]<=70,1,"RSI momentum"),
+                  (abs(ret1)>=1.5 or rng>=5,1,"potensi volatilitas")]
+        score, reasons = sum(p for ok,p,_ in checks if ok), [s for ok,_,s in checks if ok]
+        if strength.iloc[-1]>78: score-=2; reasons.append("risiko jenuh beli")
+        return {"ticker":symbol,"name":name,"region":region,"close":price,"ret1":ret1,"ret5":ret5,
+                "ret20":ret20,"rsi":float(strength.iloc[-1]),"vol_ratio":vr,"score":score,
+                "date":frame.index[-1].strftime("%Y-%m-%d"),"reasons":reasons}
+    except (KeyError, ValueError, TypeError, IndexError, ZeroDivisionError): return None
 
-        close = frame["Close"].astype(float)
-        volume = frame["Volume"].astype(float)
-        ema20 = close.ewm(span=20, adjust=False).mean()
-        ema50 = close.ewm(span=50, adjust=False).mean()
-        strength = rsi(close)
-        avg_volume = volume.rolling(20).mean()
-        last_close, prev_close = float(close.iloc[-1]), float(close.iloc[-2])
-        ret1 = (last_close / prev_close - 1) * 100
-        ret5 = (last_close / float(close.iloc[-6]) - 1) * 100
-        ret20 = (last_close / float(close.iloc[-21]) - 1) * 100
-        last_ema20, last_ema50 = float(ema20.iloc[-1]), float(ema50.iloc[-1])
-        last_rsi = float(strength.iloc[-1]) if pd.notna(strength.iloc[-1]) else 50.0
-        mean_vol = float(avg_volume.iloc[-1]) if pd.notna(avg_volume.iloc[-1]) else 0.0
-        vol_ratio = float(volume.iloc[-1] / mean_vol) if mean_vol > 0 else 0.0
-
-        score, reasons = 0, []
-        checks = [
-            (last_close > last_ema20, 2, "harga di atas EMA20"),
-            (last_ema20 > last_ema50, 2, "tren EMA20 > EMA50"),
-            (ret5 > 0, 2, "momentum 5 hari positif"),
-            (ret20 > 0, 1, "momentum 20 hari positif"),
-            (vol_ratio >= 1.2, 2, "volume di atas rata-rata"),
-            (50 <= last_rsi <= 70, 1, "RSI di zona momentum"),
-            (ret1 > 0, 1, "kenaikan harian positif"),
-        ]
-        for passed, points, reason in checks:
-            if passed:
-                score += points
-                reasons.append(reason)
-        if last_rsi > 78:
-            score -= 2
-            reasons.append("risiko jenuh beli")
-        if ret1 < -4:
-            score -= 2
-            reasons.append("tekanan turun harian")
-        if vol_ratio < 0.25:
-            score -= 1
-            reasons.append("volume sangat tipis")
-        return {
-            "ticker": symbol, "name": name, "close": last_close,
-            "ret1": ret1, "ret5": ret5, "ret20": ret20, "rsi": last_rsi,
-            "vol_ratio": vol_ratio, "score": score,
-            "date": frame.index[-1].strftime("%Y-%m-%d"), "reasons": reasons,
-        }
-    except (KeyError, ValueError, TypeError, IndexError, ZeroDivisionError):
-        return None
-
-
-def market_context():
-    try:
-        hist = yf.Ticker("^JKSE").history(period="10d", interval="1d")
-        if hist is None or hist.empty or "Close" not in hist:
-            return "IHSG: data tidak tersedia", ""
-        closes = hist["Close"].dropna()
-        latest = float(closes.iloc[-1])
-        change = (latest / float(closes.iloc[-2]) - 1) * 100 if len(closes) >= 2 else 0.0
-        return f"IHSG: {latest:,.2f} ({change:+.2f}%)", hist.index[-1].strftime("%Y-%m-%d")
-    except Exception:
-        return "IHSG: data tidak tersedia", ""
-
-
-def format_report(ranked, market_line, market_date, report_time):
-    dates = sorted({row["date"] for row in ranked})
-    latest_date = dates[-1] if dates else "tidak tersedia"
-    lines = [
-        "📊 MARC | DAILY STOCK SCANNER",
-        f"Waktu laporan: {report_time.strftime('%d %b %Y %H:%M WIB')}",
-        f"Data harga terakhir: {latest_date}",
-        market_line, "",
-        "Top 10 kandidat momentum BEI (bukan kepastian harga naik):",
-    ]
-    for idx, row in enumerate(ranked[:TOP_N], start=1):
-        lines.append(
-            f"{idx}. {row['ticker']} — Rp{row['close']:,.0f} | Skor {row['score']}/11\n"
-            f"   1D {row['ret1']:+.2f}% · 5D {row['ret5']:+.2f}% · "
-            f"20D {row['ret20']:+.2f}% · RSI {row['rsi']:.0f} · Vol {row['vol_ratio']:.1f}x"
-        )
-        if row["reasons"]:
-            lines.append("   " + ", ".join(row["reasons"][:3]))
-    lines += [
-        "",
-        "Skor = ranking teknikal sederhana, bukan probabilitas naik.",
-        "Periksa likuiditas, berita, dan risiko sebelum mengambil keputusan.",
-        "Data Yahoo Finance dapat terlambat/tidak lengkap. Bukan nasihat investasi.",
-    ]
-    if market_date and market_date != latest_date:
-        lines.insert(3, f"Catatan: tanggal data IHSG ({market_date}) berbeda dari saham.")
+def scan_stocks():
+    universe=load_stock_universe(); data=download_history([x[0] for x in universe])
+    ranked=[r for t,n,region in universe if (r:=score_stock(t,n,extract_symbol(data,t),region))]
+    ranked.sort(key=lambda r:(r["score"],r["vol_ratio"],abs(r["ret1"]),r["ret5"]),reverse=True)
+    if not ranked: raise RuntimeError("Tidak ada data saham valid dari penyedia.")
+    now=datetime.now(JAKARTA); latest=max(r["date"] for r in ranked)
+    if (now.date()-datetime.strptime(latest,"%Y-%m-%d").date()).days>5:
+        raise RuntimeError(f"Data saham terakhir {latest} terlalu lama; laporan dibatalkan.")
+    lines=["📈 MARC | SAHAM INDONESIA + GLOBAL",f"Waktu: {now:%d %b %Y %H:%M WIB} | Data terakhir: {latest}",
+           "Top 10 kandidat pergerakan/volume sesi berikutnya; bukan prediksi pasti.",
+           "Ranking dari watchlist, bukan seluruh bursa.",""]
+    for i,r in enumerate(ranked[:TOP_N],1):
+        price=f"Rp{r['close']:,.0f}" if r["ticker"].endswith(".JK") else f"{r['close']:,.2f} (mata uang listing)"
+        lines += [f"{i}. {r['ticker']} ({r['region']}) — {price} | skor {r['score']}/11",
+                  f"   1D {r['ret1']:+.2f}% · 5D {r['ret5']:+.2f}% · 20D {r['ret20']:+.2f}% · RSI {r['rsi']:.0f} · Vol {r['vol_ratio']:.1f}x",
+                  "   "+", ".join(r["reasons"][:3])]
+    lines += ["","Periksa kalender bursa, berita, likuiditas, dan harga broker sebelum transaksi."]
     return "\n".join(lines)
 
+def scan_crypto():
+    universe=load_market_csv(CRYPTO_FILE); data=download_history([x[0] for x in universe],"3mo","1d"); ranked=[]
+    for ticker,name in universe:
+        try:
+            f=extract_symbol(data,ticker)
+            if not {"Close","Volume"}.issubset(f.columns): continue
+            f=f[["Close","Volume"]].dropna()
+            if len(f)<25: continue
+            c,v=f.Close.astype(float),f.Volume.astype(float); p=float(c.iloc[-1])
+            r1=(p/float(c.iloc[-2])-1)*100; r7=(p/float(c.iloc[-8])-1)*100
+            av=float(v.iloc[-21:-1].mean()); vr=float(v.iloc[-1]/av) if av>0 else 0
+            strength=float(rsi(c).iloc[-1])
+            score=max(-5,min(5,r1))*.8+max(-5,min(5,r7))*.5+min(vr,5)*1.5
+            if strength>82: score-=2
+            if abs(r1)>15: score-=1
+            ranked.append({"ticker":ticker,"name":name,"price":p,"ret1":r1,"ret7":r7,"vol":vr,"rsi":strength,"score":score,"date":f.index[-1].strftime("%Y-%m-%d")})
+        except (KeyError,ValueError,TypeError,IndexError,ZeroDivisionError): continue
+    ranked.sort(key=lambda r:(r["score"],r["vol"]),reverse=True)
+    if not ranked: raise RuntimeError("Tidak ada data crypto valid dari penyedia.")
+    now=datetime.now(JAKARTA); lines=["₿ MARC | CRYPTO MOMENTUM & HYPE",
+       f"Waktu: {now:%d %b %Y %H:%M WIB} | Data harian terakhir: {max(r['date'] for r in ranked)}",
+       "Top 10 dari watchlist; hype ≠ jaminan likuiditas/profit.",""]
+    for i,r in enumerate(ranked[:TOP_N],1):
+        lines += [f"{i}. {r['ticker']} — {r['price']:.6g} USD | hype {r['score']:.1f}",
+                  f"   24j {r['ret1']:+.2f}% · 7D {r['ret7']:+.2f}% · RSI {r['rsi']:.0f} · Vol {r['vol']:.1f}x"]
+    lines += ["","Periksa spread, kedalaman order book, exchange, funding, dan berita."]
+    return "\n".join(lines)
+
+def scan_commodities():
+    now=datetime.now(JAKARTA); lines=["🛢️ MARC | KOMODITAS: LEVEL & SETUP 1–5 JAM",
+        f"Waktu analisis: {now:%d %b %Y %H:%M WIB}","Level indikatif dari candle 15 menit, bukan sinyal otomatis.",""]
+    valid=0
+    for ticker,name in load_market_csv(COMMODITY_FILE):
+        try:
+            f=yf.Ticker(ticker).history(period="5d",interval="15m",auto_adjust=True)
+            if f is None or f.empty or not {"Close","High","Low"}.issubset(f.columns): continue
+            f=f[["Close","High","Low"]].dropna()
+            if len(f)<20: continue
+            c=f.Close.astype(float); recent=f.iloc[-20:]; p=float(c.iloc[-1])
+            s=float(recent.Low.min()); resistance=float(recent.High.max())
+            ema9=float(c.ewm(span=9,adjust=False).mean().iloc[-1]); ema21=float(c.ewm(span=21,adjust=False).mean().iloc[-1])
+            strength=float(rsi(c).iloc[-1]); span=max(resistance-s,1e-9)
+            if ema9>ema21 and 45<=strength<72 and p<resistance*.997:
+                bias="LONG WATCH" if p<s+span*.35 else "tunggu konfirmasi"
+            elif ema9<ema21 and 28<strength<=55 and p>s*1.003:
+                bias="SHORT WATCH" if p>resistance-span*.65 else "tunggu konfirmasi"
+            else: bias="WAIT / no-trade"
+            lines += [f"{ticker} — {name}",f"   Harga {p:.4g} | Support {s:.4g} | Resistance {resistance:.4g}",
+                      f"   Bias 1–5 jam: {bias} · RSI {strength:.0f} · jarak S {max((p-s)/p*100,0):.2f}% / R {max((resistance-p)/p*100,0):.2f}%"]
+            valid+=1
+        except Exception as exc: print(f"Commodity skip {ticker}: {exc}",file=sys.stderr)
+    if not valid: raise RuntimeError("Data intraday komoditas tidak tersedia.")
+    lines += ["","Support/resistance berdasarkan 20 candle 15m terbaru. Periksa sesi, kontrak/rollover, spread dan stop-loss."]
+    return "\n".join(lines)
 
 def send_telegram(message):
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        raise RuntimeError("Secret TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID belum dikonfigurasi.")
-    response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": message, "disable_web_page_preview": True},
-        timeout=25,
-    )
-    response.raise_for_status()
-    if not response.json().get("ok"):
-        raise RuntimeError("Telegram API gagal mengirim laporan.")
-
+    token=os.environ.get("TELEGRAM_BOT_TOKEN","").strip(); chat=os.environ.get("TELEGRAM_CHAT_ID","").strip()
+    if not token or not chat: raise RuntimeError("Secret TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID belum dikonfigurasi.")
+    chunks=[]; current=""
+    for line in message.splitlines():
+        if len(current)+len(line)+1>3500:
+            if current: chunks.append(current)
+            current=line
+        else: current=f"{current}\n{line}" if current else line
+    if current: chunks.append(current)
+    for chunk in chunks:
+        response=requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id":chat,"text":chunk,"disable_web_page_preview":True},timeout=25)
+        response.raise_for_status()
+        if not response.json().get("ok"): raise RuntimeError("Telegram API gagal mengirim laporan.")
 
 def main():
-    now = datetime.now(JAKARTA)
-    universe = load_universe()
-    symbols = [symbol for symbol, _ in universe]
-    names = dict(universe)
-    history = get_history(symbols)
-    ranked = [row for symbol in symbols
-              if (row := score_stock(symbol, names[symbol], history)) is not None]
-    if not ranked:
-        raise RuntimeError("Tidak ada saham valid. Periksa koneksi dan data penyedia.")
-    ranked.sort(key=lambda row: (row["score"], row["ret5"], row["vol_ratio"]), reverse=True)
-    market_line, market_date = market_context()
-    newest = max(row["date"] for row in ranked)
-    newest_day = datetime.strptime(newest, "%Y-%m-%d").date()
-    age_days = (now.date() - newest_day).days
-    if age_days > 4:
-        raise RuntimeError(f"Data saham terakhir {newest} terlalu lama ({age_days} hari). Laporan tidak dikirim.")
-    report = format_report(ranked[:TOP_N], market_line, market_date, now)
-    send_telegram(report)
-    print(report)
+    mode=os.environ.get("MARC_REPORT_TYPE","all").strip().lower(); reports=[]
+    tasks=[]
+    if mode in ("all","stocks"): tasks.append(("saham",scan_stocks))
+    if mode in ("all","evening","crypto","crypto_commodities"): tasks.append(("crypto",scan_crypto))
+    if mode in ("all","evening","commodities","crypto_commodities"): tasks.append(("komoditas",scan_commodities))
+    if not tasks: raise RuntimeError(f"MARC_REPORT_TYPE tidak dikenal: {mode}")
+    for name,func in tasks:
+        try: reports.append(func())
+        except Exception as exc:
+            if mode in ("stocks","crypto","commodities"): raise
+            reports.append(f"⚠️ Laporan {name} gagal: {exc}")
+    message="\n\n━━━━━━━━━━━━━━━━━━\n\n".join(reports); send_telegram(message); print(message)
 
-
-if __name__ == "__main__":
-    try:
-        main()
+if __name__=="__main__":
+    try: main()
     except Exception as exc:
-        print(f"MARC ERROR: {exc}", file=sys.stderr)
-        raise
+        print(f"MARC ERROR: {exc}",file=sys.stderr); raise
