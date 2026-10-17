@@ -105,7 +105,7 @@ def scan_stocks():
     return "\n".join(lines)
 
 def scan_crypto():
-    universe=load_market_csv(CRYPTO_FILE); data=download_history([x[0] for x in universe],"3mo","1d"); ranked=[]
+    universe=load_market_csv(CRYPTO_FILE); data=download_history([x[0] for x in universe],"10d","1h"); ranked=[]
     for ticker,name in universe:
         try:
             f=extract_symbol(data,ticker)
@@ -113,8 +113,10 @@ def scan_crypto():
             f=f[["Close","Volume"]].dropna()
             if len(f)<25: continue
             c,v=f.Close.astype(float),f.Volume.astype(float); p=float(c.iloc[-1])
-            r1=(p/float(c.iloc[-2])-1)*100; r7=(p/float(c.iloc[-8])-1)*100
-            av=float(v.iloc[-21:-1].mean()); vr=float(v.iloc[-1]/av) if av>0 else 0
+            r1=(p/float(c.iloc[max(0,len(c)-25)])-1)*100
+            r7=(p/float(c.iloc[max(0,len(c)-169)])-1)*100
+            recent_vol=float(v.iloc[-24:].mean()); baseline=float(v.iloc[:-24].mean()) if len(v)>24 else 0
+            vr=float(recent_vol/baseline) if baseline>0 else 0
             strength=float(rsi(c).iloc[-1])
             score=max(-5,min(5,r1))*.8+max(-5,min(5,r7))*.5+min(vr,5)*1.5
             if strength>82: score-=2
@@ -124,7 +126,7 @@ def scan_crypto():
     ranked.sort(key=lambda r:(r["score"],r["vol"]),reverse=True)
     if not ranked: raise RuntimeError("Tidak ada data crypto valid dari penyedia.")
     now=datetime.now(JAKARTA); lines=["₿ MARC | CRYPTO MOMENTUM & HYPE",
-       f"Waktu: {now:%d %b %Y %H:%M WIB} | Data harian terakhir: {max(r['date'] for r in ranked)}",
+       f"Waktu: {now:%d %b %Y %H:%M WIB} | Data candle 1 jam terakhir: {max(r['date'] for r in ranked)}",
        "Top 10 dari watchlist; hype ≠ jaminan likuiditas/profit.",""]
     for i,r in enumerate(ranked[:TOP_N],1):
         lines += [f"{i}. {r['ticker']} — {r['price']:.6g} USD | hype {r['score']:.1f}",
