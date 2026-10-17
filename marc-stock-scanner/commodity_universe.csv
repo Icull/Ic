@@ -1,0 +1,11 @@
+ticker,name
+GC=F,Gold futures
+SI=F,Silver futures
+CL=F,WTI crude oil futures
+BZ=F,Brent crude oil futures
+NG=F,Natural gas futures
+HG=F,Copper futures
+PL=F,Platinum futures
+PA=F,Palladium futures
+ZC=F,Corn futures
+ZS=F,Soybean futures
